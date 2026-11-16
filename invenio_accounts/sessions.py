@@ -10,6 +10,9 @@ This module provides management functionality and populates the
 created.
 """
 
+import os
+from functools import lru_cache
+
 from flask import after_this_request, current_app, request, session
 from invenio_db import db
 from invenio_rest.csrf import reset_token
@@ -23,12 +26,56 @@ from .proxies import current_accounts
 _sessionstore = LocalProxy(lambda: current_app.kvsession_store)
 
 
+@lru_cache(maxsize=2)
+def _open_mmdb(path, mtime_ns):
+    """Open the MaxMind DB at ``path``.
+
+    ``mtime_ns`` is only part of the cache key, so that a file that was
+    replaced on disk (e.g. by a monthly refresh) is opened again.
+    """
+    # Imported here so that it is only loaded when the setting is used.
+    import maxminddb
+
+    return maxminddb.open_database(path)
+
+
+def _mmdb_country(path, ip):
+    """Look up ``ip`` in the MaxMind DB at ``path``."""
+    reader = _open_mmdb(path, os.stat(path).st_mtime_ns)
+    try:
+        record = reader.get(ip)
+    except ValueError:  # not a valid IP address
+        return None
+    return (record or {}).get("country", {}).get("iso_code")
+
+
 def _ip2country(ip):
-    """Get user country."""
-    if ip:
+    """Get user country.
+
+    Uses the MaxMind DB from ``ACCOUNTS_GEOIP_DB_PATH`` if it is set, and
+    ``iptocc`` otherwise. If the file cannot be read, logs the error and uses
+    ``iptocc``.
+    """
+    if not ip:
+        return None
+
+    path = current_app.config.get("ACCOUNTS_GEOIP_DB_PATH")
+    if path:
+        try:
+            cc = _mmdb_country(path, ip)
+        except Exception:
+            # Not the IP in the message, it is personal data.
+            current_app.logger.exception(
+                "Cannot read the GeoIP database from ACCOUNTS_GEOIP_DB_PATH=%r, "
+                "falling back to iptocc.",
+                path,
+            )
+            cc = country_code(ip)
+    else:
         cc = country_code(ip)
-        # "EU" is a registry placeholder, not a country.
-        return None if cc == "EU" else cc
+
+    # "EU" is a registry placeholder, not a country.
+    return None if cc == "EU" else cc
 
 
 def _extract_info_from_useragent(user_agent):
