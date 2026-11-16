@@ -479,6 +479,50 @@ def test_ip2country_mmdb_picks_up_replaced_file(app, make_mmdb):
         assert _ip2country(CERN_IP) == "FR"
 
 
+def test_ip2country_mmdb_replaced_file_keeping_mtime(app, make_mmdb, tmp_path):
+    """A file replaced by a rename is read again, even with the same mtime and size.
+
+    Tools like ``rsync -t`` or ``cp -p`` keep the modification time, and the
+    new database can have the same size. Only the inode is different.
+    """
+    path = make_mmdb({"188.184.0.0/16": "DE"})
+    app.config["ACCOUNTS_GEOIP_DB_PATH"] = path
+    with app.app_context():
+        assert _ip2country(CERN_IP) == "DE"
+
+        old = os.stat(path)
+        new_path = make_mmdb({"188.184.0.0/16": "FR"}, name="new.mmdb")
+        os.utime(new_path, ns=(old.st_atime_ns, old.st_mtime_ns))
+        os.replace(new_path, path)
+        new = os.stat(path)
+        # the point of the test: only the inode is different
+        assert (new.st_mtime_ns, new.st_size) == (old.st_mtime_ns, old.st_size)
+        assert new.st_ino != old.st_ino
+
+        assert _ip2country(CERN_IP) == "FR"
+
+
+def test_ip2country_mmdb_rewritten_file_keeping_mtime(app, make_mmdb):
+    """A file that is written in place is read again if its size changes."""
+    path = make_mmdb({"188.184.0.0/16": "DE"})
+    app.config["ACCOUNTS_GEOIP_DB_PATH"] = path
+    with app.app_context():
+        assert _ip2country(CERN_IP) == "DE"
+        assert _ip2country("2001:db8::1") is None
+
+        old = os.stat(path)
+        make_mmdb({"188.184.0.0/16": "FR", "2001:db8::/32": "NL"})
+        os.utime(path, ns=(old.st_atime_ns, old.st_mtime_ns))
+        new = os.stat(path)
+        # the point of the test: only the size is different
+        assert new.st_mtime_ns == old.st_mtime_ns
+        assert new.st_ino == old.st_ino
+        assert new.st_size != old.st_size
+
+        assert _ip2country(CERN_IP) == "FR"
+        assert _ip2country("2001:db8::1") == "NL"
+
+
 def test_ip2country_mmdb_reader_is_reused(app, make_mmdb):
     """The file is opened once, not for every lookup."""
     app.config["ACCOUNTS_GEOIP_DB_PATH"] = make_mmdb({"188.184.0.0/16": "DE"})
