@@ -26,11 +26,23 @@ from .proxies import current_accounts
 _sessionstore = LocalProxy(lambda: current_app.kvsession_store)
 
 
+def _file_signature(path):
+    """Return a value that changes when the file at ``path`` is replaced.
+
+    The modification time alone is not enough: it can be kept by the tool that
+    copies the file, and it can be too coarse on some file systems. The size
+    catches most of those. The inode catches a file that is written next to
+    the old one and renamed over it, which is the safe way to refresh a file.
+    """
+    stat = os.stat(path)
+    return stat.st_mtime_ns, stat.st_size, stat.st_ino
+
+
 @lru_cache(maxsize=2)
-def _open_mmdb(path, mtime_ns):
+def _open_mmdb(path, signature):
     """Open the MaxMind DB at ``path``.
 
-    ``mtime_ns`` is only part of the cache key, so that a file that was
+    ``signature`` is only part of the cache key, so that a file that was
     replaced on disk (e.g. by a monthly refresh) is opened again.
     """
     # Imported here so that it is only loaded when the setting is used.
@@ -41,7 +53,7 @@ def _open_mmdb(path, mtime_ns):
 
 def _mmdb_country(path, ip):
     """Look up ``ip`` in the MaxMind DB at ``path``."""
-    reader = _open_mmdb(path, os.stat(path).st_mtime_ns)
+    reader = _open_mmdb(path, _file_signature(path))
     try:
         record = reader.get(ip)
     except ValueError:  # not a valid IP address
